@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { StereoEffect } from 'three/addons/effects/StereoEffect.js';
+import { VRButton } from 'three/addons/webxr/VRButton.js'; // Importar VRButton
 
 // --- DOM Elements ---
 const uiContainer = document.getElementById('ui-container');
@@ -8,34 +8,23 @@ const modeVrWorldBtn = document.getElementById('mode-vr-world');
 const imageControls = document.getElementById('image-controls');
 const prevImageBtn = document.getElementById('prev-image');
 const nextImageBtn = document.getElementById('next-image');
-const toggleVrModeBtn = document.getElementById('toggle-vr-mode');
+const vrButtonContainer = document.getElementById('vr-button-container'); // Contenedor para el VRButton
 const vrGazePointer = document.getElementById('vr-gaze-pointer');
 
 // --- Three.js Variables ---
-let renderer, camera, scene, stereoEffect;
+let renderer, camera, scene; // Ahora solo una cámara y una escena principal
 let currentMode = 'start'; // 'start', 'images', 'vr-world'
-let isVrMode = false;
 
 // --- Image Mode Variables ---
 const stereoImages = [
-    './images/stereo-image-1.jpeg',
-    './images/stereo-image-2.jpeg',
-    './images/stereo-image-3.jpeg',
-    './images/stereo-image-4.jpeg',
-    './images/stereo-image-5.jpeg',
-    './images/stereo-image-6.jpeg',
-    './images/stereo-image-7.jpeg',
-    './images/stereo-image-8.jpg',
-    './images/stereo-image-9.JPG',
-    './images/stereo-image-10.jpg',
-
+    './images/stereo-image-1.jpg',
+    './images/stereo-image-2.jpg',
+    './images/stereo-image-3.jpg',
 ];
 let currentImageIndex = 0;
 let imageMesh; // Plano donde se proyectará la imagen
-let imageScene, imageCamera; // Escena y cámara separadas para las imágenes
 
 // --- VR World Mode Variables ---
-let vrWorldScene, vrWorldCamera; // Escena y cámara separadas para el mundo VR
 let cubesAndPyramids = []; // Array para los objetos del mundo VR
 
 // --- Gaze Interaction Variables ---
@@ -44,7 +33,6 @@ const GAZE_DURATION = 1500; // Milisegundos para mantener la mirada para activar
 
 // --- Initialization ---
 init();
-animate();
 
 function init() {
     // Renderer
@@ -54,45 +42,43 @@ function init() {
     renderer.setClearColor(0x000000, 1);
     document.body.appendChild(renderer.domElement);
 
-    // Stereo Effect (will wrap the renderer)
-    stereoEffect = new StereoEffect(renderer);
-    stereoEffect.setSize(window.innerWidth, window.innerHeight);
+    // Habilitar WebXR
+    renderer.xr.enabled = true;
+
+    // Crea el botón VR y añádelo a un contenedor en tu HTML
+    vrButtonContainer.appendChild(VRButton.createButton(renderer));
+
+    // Cámara (una sola cámara principal para toda la aplicación)
+    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(0, 1.6, 0); // Altura de ojos promedio para VR
+
+    // --- Scene Setup ---
+    scene = new THREE.Scene(); // Una sola escena principal que contendrá los elementos del modo activo
 
     // --- Image Mode Setup ---
-    imageScene = new THREE.Scene();
-    imageCamera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-    imageCamera.position.z = 0.01; // Muy cerca para ver el plano de la imagen
-
     const imageGeometry = new THREE.PlaneGeometry(2, 1); // Relación de aspecto 2:1 para SbS
     imageMesh = new THREE.Mesh(imageGeometry);
-    imageScene.add(imageMesh);
-    loadImage(stereoImages[currentImageIndex]);
+    // Posicionar el plano de la imagen un poco adelante para que sea visible
+    imageMesh.position.set(0, 1.6, -3); // Centrado a la altura de los ojos, 3 metros adelante
+    loadImage(stereoImages[currentImageIndex]); // Carga la primera imagen, pero no la agrega a la escena aún
 
     // --- VR World Mode Setup ---
-    vrWorldScene = new THREE.Scene();
-    vrWorldCamera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-    vrWorldCamera.position.set(0, 10, 0); // Posición inicial
-    vrWorldCamera.lookAt(0, 0, -50); // Mirando hacia adelante
-
     // Sky
-    vrWorldScene.background = new THREE.Color(0x87ceeb); // Light blue sky
+    const vrWorldSkyColor = new THREE.Color(0x87ceeb); // Light blue sky
 
     // Ground
     const groundGeometry = new THREE.PlaneGeometry(1000, 1000);
     const groundMaterial = new THREE.MeshLambertMaterial({ color: 0x6b8e23 }); // Olive green
     const ground = new THREE.Mesh(groundGeometry, groundMaterial);
     ground.rotation.x = -Math.PI / 2;
-    vrWorldScene.add(ground);
+    // Posición del suelo (en 0,0,0)
+    ground.position.y = -0.01; // Ligeramente por debajo para evitar z-fighting
 
     // Lights
     const ambientLight = new THREE.AmbientLight(0x404040);
-    vrWorldScene.add(ambientLight);
     const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
     directionalLight.position.set(0, 1, 0).normalize();
-    vrWorldScene.add(directionalLight);
 
-    // Create mountains (cubes and pyramids)
-    createVrWorldMountains();
 
     // --- Event Listeners ---
     window.addEventListener('resize', onWindowResize);
@@ -100,88 +86,100 @@ function init() {
     modeVrWorldBtn.addEventListener('click', () => setMode('vr-world'));
     prevImageBtn.addEventListener('click', prevImage);
     nextImageBtn.addEventListener('click', nextImage);
-    toggleVrModeBtn.addEventListener('click', toggleVrMode);
+
+    // Eventos para WebXR (cuando se entra o sale de VR)
+    renderer.xr.addEventListener('sessionstart', onSessionStart);
+    renderer.xr.addEventListener('sessionend', onSessionEnd);
 
     // Gaze interaction for VR UI
-    document.body.addEventListener('mousemove', onGazeMove);
-    document.body.addEventListener('mousedown', onGazeClick); // Simulate click for desktop
-    document.body.addEventListener('mouseup', onGazeRelease);
-    document.body.addEventListener('touchstart', onGazeClick); // Simulate click for mobile
-    document.body.addEventListener('touchend', onGazeRelease);
+    // En WebXR, la posición del puntero de mirada se obtiene a través del raycaster
+    // No necesitamos mousemove/mousedown directamente en el body para la mirada
 
     // Start in UI mode
     showUI();
-    setMode('start');
+    setMode('start'); // Configura el estado inicial sin objetos en escena
 }
 
 function onWindowResize() {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
-
-    imageCamera.aspect = window.innerWidth / window.innerHeight;
-    imageCamera.updateProjectionMatrix();
-
-    vrWorldCamera.aspect = window.innerWidth / window.innerHeight;
-    vrWorldCamera.updateProjectionMatrix();
-
     renderer.setSize(window.innerWidth, window.innerHeight);
-    stereoEffect.setSize(window.innerWidth, window.innerHeight);
 }
 
 function setMode(mode) {
     currentMode = mode;
     console.log(`Cambiando a modo: ${mode}`);
 
-    // Update the active camera and scene based on the mode
-    if (mode === 'images') {
-        camera = imageCamera;
-        scene = imageScene;
-        imageControls.classList.remove('hidden');
-        uiContainer.classList.remove('hidden'); // Ensure UI is visible initially
-    } else if (mode === 'vr-world') {
-        camera = vrWorldCamera;
-        scene = vrWorldScene;
-        imageControls.classList.add('hidden');
-        uiContainer.classList.remove('hidden'); // Ensure UI is visible initially
-    } else { // 'start' mode
-        uiContainer.classList.remove('hidden');
-        imageControls.classList.add('hidden');
-        // No active scene/camera until a mode is selected
-        camera = undefined;
-        scene = undefined;
+    // Limpia la escena de todos los elementos anteriores
+    while (scene.children.length > 0) {
+        scene.remove(scene.children[0]);
     }
-    // Update effect size immediately
-    stereoEffect.setSize(window.innerWidth, window.innerHeight);
+
+    if (mode === 'images') {
+        scene.add(imageMesh);
+        imageControls.classList.remove('hidden');
+        // Asegúrate de que la cámara esté orientada correctamente para ver la imagen
+        camera.position.set(0, 1.6, 0);
+        camera.lookAt(imageMesh.position);
+    } else if (mode === 'vr-world') {
+        // Agrega luces y suelo
+        scene.add(new THREE.AmbientLight(0x404040));
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        directionalLight.position.set(0, 1, 0).normalize();
+        scene.add(directionalLight);
+        scene.background = new THREE.Color(0x87ceeb); // Light blue sky
+
+        // Agrega el suelo
+        const groundGeometry = new THREE.PlaneGeometry(1000, 1000);
+        const groundMaterial = new THREE.MeshLambertMaterial({ color: 0x6b8e23 });
+        const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+        ground.rotation.x = -Math.PI / 2;
+        ground.position.y = -0.01;
+        scene.add(ground);
+
+        // Crea y agrega las montañas
+        createVrWorldMountains();
+        cubesAndPyramids.forEach(obj => scene.add(obj));
+
+        // Posición inicial de la cámara para el mundo VR
+        camera.position.set(0, 1.6, 0); // Altura de los ojos
+    } else { // 'start' mode
+        // No hay elementos específicos en la escena, solo la UI
+        camera.position.set(0, 1.6, 5); // Una posición por defecto
+        scene.background = new THREE.Color(0x000000); // Fondo negro
+    }
+    // Asegúrate de que la UI sea visible al cambiar de modo (fuera de VR)
+    if (!renderer.xr.isPresenting) {
+        showUI();
+    }
 }
 
-function toggleVrMode() {
-    isVrMode = !isVrMode;
-    if (isVrMode) {
-        uiContainer.classList.add('hidden');
-        vrGazePointer.style.display = 'block';
-        toggleVrModeBtn.textContent = 'Salir de VR (Side-by-Side)';
-        console.log("Modo VR activado.");
-    } else {
-        uiContainer.classList.remove('hidden');
-        vrGazePointer.style.display = 'none';
-        toggleVrModeBtn.textContent = 'Activar VR (Side-by-Side)';
-        clearGazeTimeout(); // Clear any pending gaze actions
-        console.log("Modo VR desactivado.");
-    }
+function onSessionStart() {
+    console.log("Sesión WebXR iniciada.");
+    hideUI();
+    vrGazePointer.style.display = 'block';
+}
+
+function onSessionEnd() {
+    console.log("Sesión WebXR finalizada.");
+    showUI();
+    vrGazePointer.style.display = 'none';
+    clearGazeTimeout(); // Limpia cualquier acción de mirada pendiente
 }
 
 function showUI() {
     uiContainer.classList.remove('hidden');
-    vrGazePointer.style.display = 'none';
+    vrGazePointer.style.display = 'none'; // El puntero de mirada solo es visible en VR
+    // Es posible que necesites ajustar la visibilidad del botón VR
+    const vrButton = vrButtonContainer.querySelector('.webxr-button');
+    if (vrButton) vrButton.style.display = 'block';
 }
 
 function hideUI() {
     uiContainer.classList.add('hidden');
-    if (isVrMode) {
-        vrGazePointer.style.display = 'block';
-    } else {
-        vrGazePointer.style.display = 'none';
-    }
+    vrGazePointer.style.display = 'block';
+    const vrButton = vrButtonContainer.querySelector('.webxr-button');
+    if (vrButton) vrButton.style.display = 'none'; // Ocultar el botón VR cuando ya estamos en VR
 }
 
 // --- Image Mode Functions ---
@@ -214,108 +212,152 @@ function nextImage() {
 function createVrWorldMountains() {
     const minHeight = 5;
     const maxHeight = 50;
-    const numMountains = 50; // Más montañas para un mundo más denso
+    const numMountains = 50;
+
+    // Limpia las montañas existentes antes de crearlas de nuevo
+    cubesAndPyramids.forEach(obj => {
+        if (scene.children.includes(obj)) {
+            scene.remove(obj);
+        }
+        obj.geometry.dispose();
+        obj.material.dispose();
+    });
+    cubesAndPyramids = [];
 
     for (let i = 0; i < numMountains; i++) {
         const type = Math.random() > 0.5 ? 'cube' : 'pyramid';
         const height = Math.random() * (maxHeight - minHeight) + minHeight;
-        const width = height * (0.5 + Math.random() * 0.5); // Proporción variable
+        const width = height * (0.5 + Math.random() * 0.5);
         const depth = height * (0.5 + Math.random() * 0.5);
 
         let geometry;
         if (type === 'cube') {
             geometry = new THREE.BoxGeometry(width, height, depth);
-        } else { // Pyramid (Tetrahedron or Cone)
-            geometry = new THREE.ConeGeometry(width / 2, height, 4); // 4-sided pyramid
+        } else {
+            geometry = new THREE.ConeGeometry(width / 2, height, 4);
         }
 
         const material = new THREE.MeshLambertMaterial({
-            color: new THREE.Color(Math.random() * 0.2 + 0.3, Math.random() * 0.1 + 0.2, Math.random() * 0.1 + 0.2) // Tonos de gris-marrón
+            color: new THREE.Color(Math.random() * 0.2 + 0.3, Math.random() * 0.1 + 0.2, Math.random() * 0.1 + 0.2)
         });
 
         const mountain = new THREE.Mesh(geometry, material);
 
-        // Random position, avoid spawning exactly at (0,0,0)
         let x, z;
         do {
             x = (Math.random() - 0.5) * 800;
             z = (Math.random() - 0.5) * 800;
-        } while (Math.abs(x) < 50 && Math.abs(z) < 50); // Keep some distance from origin
+        } while (Math.abs(x) < 50 && Math.abs(z) < 50);
 
-        mountain.position.set(x, height / 2, z); // Base en el suelo
-        mountain.rotation.y = Math.random() * Math.PI * 2; // Rotación aleatoria
+        mountain.position.set(x, height / 2, z);
+        mountain.rotation.y = Math.random() * Math.PI * 2;
 
-        vrWorldScene.add(mountain);
         cubesAndPyramids.push(mountain);
     }
 }
 
-// --- Gaze Interaction (Simulated) ---
+// --- Gaze Interaction for WebXR UI ---
 const raycaster = new THREE.Raycaster();
-const mouse = new THREE.Vector2();
-let hoveredElement = null;
+let intersectedObject = null; // El objeto 3D de la UI que está siendo "mirado"
+const interactiveObjects = []; // Contendrá los meshes invisibles que representan los botones de la UI
 
-function onGazeMove(event) {
-    if (!isVrMode) return;
+function createInteractiveUIButtons() {
+    // Limpiar objetos interactivos anteriores
+    interactiveObjects.forEach(obj => scene.remove(obj));
+    interactiveObjects.length = 0; // Vaciar array
 
-    // Actualiza la posición del puntero central (simulado)
-    const clientX = window.innerWidth / 2;
-    const clientY = window.innerHeight / 2;
+    // Solo crea los botones 3D si la UI está visible y no estamos en VR
+    if (!renderer.xr.isPresenting && !uiContainer.classList.contains('hidden')) {
+        return;
+    }
 
-    mouse.x = (clientX / window.innerWidth) * 2 - 1;
-    mouse.y = -(clientY / window.innerHeight) * 2 + 1;
+    const buttonElements = uiContainer.querySelectorAll('button');
+    const tempScene = new THREE.Scene(); // Una escena temporal para obtener posiciones relativas de los botones
 
-    // Verifica si la UI está visible y si el puntero está sobre algún botón
-    if (!uiContainer.classList.contains('hidden')) {
-        // Intersección con los botones de la UI
-        const buttons = uiContainer.querySelectorAll('button');
-        let newHovered = null;
+    // Clonar los botones en Three.js como planos invisibles para raycasting
+    buttonElements.forEach(button => {
+        const rect = button.getBoundingClientRect();
 
-        buttons.forEach(button => {
-            const rect = button.getBoundingClientRect();
-            // Simular un rayo desde el centro de la pantalla
-            // Si el puntero central está dentro del botón
-            if (clientX >= rect.left && clientX <= rect.right &&
-                clientY >= rect.top && clientY <= rect.bottom) {
-                newHovered = button;
-            }
+        // Crear un plano que represente el botón en el espacio 3D
+        const geometry = new THREE.PlaneGeometry(
+            rect.width / window.innerWidth * 10,  // Escalar para que se vea bien en VR
+            rect.height / window.innerHeight * 10
+        );
+        const material = new THREE.MeshBasicMaterial({
+            color: 0xff0000,
+            transparent: true,
+            opacity: 0, // Invisible
+            side: THREE.DoubleSide
         });
+        const buttonMesh = new THREE.Mesh(geometry, material);
 
-        if (newHovered !== hoveredElement) {
-            if (hoveredElement) {
-                hoveredElement.style.border = 'none';
+        // Posicionar el mesh en el espacio 3D para que coincida con la posición percibida del botón en 2D
+        // Esto es un poco hacky y dependerá de cómo proyectes tu UI.
+        // Una forma simple es colocarlo a una distancia fija frente a la cámara
+        // y ajustar su posición XY en función de su posición relativa en pantalla.
+        const targetZ = -2; // Distancia de los botones en VR
+        const normalizedX = (rect.left + rect.width / 2) / window.innerWidth - 0.5;
+        const normalizedY = -(rect.top + rect.height / 2) / window.innerHeight + 0.5;
+
+        buttonMesh.position.set(normalizedX * 4, normalizedY * 3 + 1.6, targetZ); // Ajustar escala y altura
+
+        // Asocia el mesh 3D con el elemento DOM original para el click
+        buttonMesh.userData.domElement = button;
+        buttonMesh.name = `ui-button-${button.id}`;
+        interactiveObjects.push(buttonMesh);
+        scene.add(buttonMesh); // Añadir a la escena principal
+    });
+}
+
+function updateGazeInteraction() {
+    if (!renderer.xr.isPresenting || uiContainer.classList.contains('hidden')) {
+        // No hay interacción de mirada si no estamos en VR o la UI está oculta
+        clearGazeTimeout();
+        if (intersectedObject) {
+            intersectedObject.userData.domElement.style.border = 'none';
+            intersectedObject = null;
+        }
+        return;
+    }
+
+    // Obtener la dirección de la mirada de la cámara XR
+    // La cámara de Three.js ya está alineada con la vista del usuario en VR
+    raycaster.setFromCamera(new THREE.Vector2(0, 0), camera); // Vector (0,0) es el centro de la pantalla
+
+    const intersects = raycaster.intersectObjects(interactiveObjects, true);
+
+    if (intersects.length > 0) {
+        if (intersectedObject !== intersects[0].object) {
+            // Nuevo objeto "mirado"
+            if (intersectedObject) {
+                // Dejar de mirar el objeto anterior
+                intersectedObject.userData.domElement.style.border = 'none';
                 clearGazeTimeout();
             }
-            if (newHovered) {
-                hoveredElement = newHovered;
-                hoveredElement.style.border = '3px solid yellow'; // Highlight
-                startGazeTimeout(hoveredElement);
-            } else {
-                hoveredElement = null;
-                clearGazeTimeout();
-            }
+            intersectedObject = intersects[0].object;
+            intersectedObject.userData.domElement.style.border = '3px solid yellow'; // Resaltar
+            startGazeTimeout(intersectedObject.userData.domElement);
         }
     } else {
-        // If UI is hidden, no interaction
-        if (hoveredElement) {
-            hoveredElement.style.border = 'none';
+        // No hay objetos "mirados"
+        if (intersectedObject) {
+            intersectedObject.userData.domElement.style.border = 'none';
             clearGazeTimeout();
-            hoveredElement = null;
+            intersectedObject = null;
         }
     }
 }
-
 
 function startGazeTimeout(element) {
     clearGazeTimeout();
     vrGazePointer.classList.add('active'); // Indicar que el puntero está activo
     gazeTimeoutId = setTimeout(() => {
-        if (element && isVrMode && !uiContainer.classList.contains('hidden')) {
-            // console.log('Activando por gaze:', element.id);
+        if (element && renderer.xr.isPresenting && !uiContainer.classList.contains('hidden')) {
+            console.log('Activando por gaze:', element.id);
             element.click(); // Simular un click
             vrGazePointer.classList.remove('active'); // Reset after activation
             element.style.border = 'none'; // Quitar el highlight
-            hoveredElement = null; // Reset hovered element
+            intersectedObject = null; // Reset hovered element
         }
     }, GAZE_DURATION);
 }
@@ -328,53 +370,30 @@ function clearGazeTimeout() {
     }
 }
 
-// Simulación de clic para probar en escritorio
-function onGazeClick(event) {
-    if (!isVrMode) return;
-    // Prevenir el comportamiento por defecto de la selección de texto en móviles
-    event.preventDefault();
-
-    // Resetear el timeout y el puntero si se hace click/touch de verdad
-    clearGazeTimeout();
-    vrGazePointer.classList.add('active'); // Indicar que está presionado
-
-    // Si el UI está visible, simula un click en el elemento hovered
-    if (hoveredElement && !uiContainer.classList.contains('hidden')) {
-        // console.log('Click manual en:', hoveredElement.id);
-        hoveredElement.click();
-        hoveredElement.style.border = 'none'; // Quitar el highlight
-        hoveredElement = null;
-    }
-}
-
-function onGazeRelease() {
-    if (!isVrMode) return;
-    vrGazePointer.classList.remove('active');
-    clearGazeTimeout(); // Limpiar el timeout si se suelta el clic/touch antes de tiempo
-    if (hoveredElement) {
-         hoveredElement.style.border = '3px solid yellow'; // Re-highlight if still hovered
-         startGazeTimeout(hoveredElement); // Reiniciar el contador si se suelta después de un click corto
-    }
-}
-
-
 // --- Animation Loop ---
 function animate() {
-    requestAnimationFrame(animate);
-
-    if (currentMode === 'vr-world') {
-        // Simple movement for VR World (can be controlled by device orientation later)
-        vrWorldCamera.rotation.y += 0.001; // Gentle rotation
+    // Cuando WebXR está activo, el bucle de animación se gestiona por renderer.setAnimationLoop
+    // Fuera de VR, usamos requestAnimationFrame
+    if (!renderer.xr.isPresenting) {
+        requestAnimationFrame(animate);
+        // Actualiza las interacciones de mirada solo si la UI es visible y estamos fuera de VR
+        // (Aunque para "gaze" fuera de VR, el mousemove sería más apropiado como en la versión anterior)
+        // Para simplificar, asumimos que el gaze es principal para VR.
     }
 
-    // Render using StereoEffect if VR mode is on, else use standard renderer
-    if (isVrMode) {
-        if (camera && scene) {
-            stereoEffect.render(scene, camera);
-        }
-    } else {
-        if (camera && scene) {
-            renderer.render(scene, camera);
-        }
+    // Lógica de actualización para el mundo VR
+    if (currentMode === 'vr-world' && renderer.xr.isPresenting) {
+        // En VR, la cámara se mueve con el usuario, no la rotamos automáticamente
+        // Si no estamos en VR, podemos hacer una rotación suave para demo
+        // vrWorldCamera.rotation.y += 0.001; // Ya no aplica directamente a `camera` en WebXR
+    }
+
+    updateGazeInteraction(); // Siempre comprueba la interacción de mirada si estamos en VR
+
+    if (scene && camera) {
+        renderer.render(scene, camera);
     }
 }
+
+// El bucle de animación principal para WebXR
+renderer.setAnimationLoop(animate);

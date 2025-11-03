@@ -3,12 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Visor VR Side-by-Side</title>
+    <title>Visor VR WebXR</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
     <div id="ui-container">
-        <h1>Visor VR Side-by-Side</h1>
+        <h1>Visor VR WebXR</h1>
         <div class="mode-selector">
             <button id="mode-images">Modo Imágenes Estereoscópicas</button>
             <button id="mode-vr-world">Modo Mundo VR</button>
@@ -17,13 +17,13 @@
             <button id="prev-image">&lt; Anterior</button>
             <button id="next-image">Siguiente &gt;</button>
         </div>
-        <div id="vr-toggle-container">
-            <button id="toggle-vr-mode">Activar/Desactivar VR (Side-by-Side)</button>
-        </div>
-        <p class="instruction">Mantén presionado para activar la selección.</p>
+        <div id="vr-button-container"></div>
+        <p class="instruction">Mira y mantén para activar la selección en VR.</p>
     </div>
 
-    <div id="vr-gaze-pointer"></div> <script type="importmap">
+    <div id="vr-gaze-pointer"></div>
+
+    <script type="importmap">
         {
             "imports": {
                 "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
