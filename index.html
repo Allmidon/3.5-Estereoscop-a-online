@@ -1,28 +1,30 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Visor VR WebXR</title>
-    <link rel="stylesheet" href="style.css">
+    <title>Visor WebXR (Imágenes y Mundo)</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <style>
+        body { margin: 0; padding: 0; background-color: #000; }
+        canvas { display: block; }
+        /* Estilo para el botón de VR, en caso de que falle la carga */
+        #VRButton {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            z-index: 10;
+            border: 1px solid #fff;
+            background: rgba(0,0,0,0.5);
+            color: #fff;
+            padding: 12px 24px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: sans-serif;
+            font-size: 16px;
+        }
+    </style>
 </head>
 <body>
-    <div id="ui-container">
-        <h1>Visor VR WebXR</h1>
-        <div class="mode-selector">
-            <button id="mode-images">Modo Imágenes Estereoscópicas</button>
-            <button id="mode-vr-world">Modo Mundo VR</button>
-        </div>
-        <div id="image-controls" class="hidden">
-            <button id="prev-image">&lt; Anterior</button>
-            <button id="next-image">Siguiente &gt;</button>
-        </div>
-        <div id="vr-button-container"></div>
-        <p class="instruction">Mira y mantén para activar la selección en VR.</p>
-    </div>
-
-    <div id="vr-gaze-pointer"></div>
-
     <script type="importmap">
         {
             "imports": {
@@ -31,6 +33,7 @@
             }
         }
     </script>
+
     <script type="module" src="script.js"></script>
 </body>
 </html>

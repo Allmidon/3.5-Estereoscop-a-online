@@ -1,399 +1,418 @@
 import * as THREE from 'three';
-import { VRButton } from 'three/addons/webxr/VRButton.js'; // Importar VRButton
+import { VRButton } from 'three/addons/webxr/VRButton.js';
 
-// --- DOM Elements ---
-const uiContainer = document.getElementById('ui-container');
-const modeImagesBtn = document.getElementById('mode-images');
-const modeVrWorldBtn = document.getElementById('mode-vr-world');
-const imageControls = document.getElementById('image-controls');
-const prevImageBtn = document.getElementById('prev-image');
-const nextImageBtn = document.getElementById('next-image');
-const vrButtonContainer = document.getElementById('vr-button-container'); // Contenedor para el VRButton
-const vrGazePointer = document.getElementById('vr-gaze-pointer');
+// --- VARIABLES GLOBALES Y CONFIGURACIÓN ---
 
-// --- Three.js Variables ---
-let renderer, camera, scene; // Ahora solo una cámara y una escena principal
-let currentMode = 'start'; // 'start', 'images', 'vr-world'
+let camera, scene, renderer;
+let reticle, raycaster, clock;
 
-// --- Image Mode Variables ---
-const stereoImages = [
-    './images/stereo-image-1.jpg',
-    './images/stereo-image-2.jpg',
-    './images/stereo-image-3.jpg',
+// Grupos para gestionar los modos de la aplicación
+let menuGroup, imageViewerGroup, worldGroup;
+
+// Estado de la aplicación
+let currentMode = 'menu';
+let imageCollection = [
+    // IMPORTANTE: Reemplaza estas URLs con tus propias imágenes SBS
+    // He usado imágenes de ejemplo de Wikimedia Commons (formato anaglifo, pero sirven para SBS)
+    // Para un efecto 3D real, necesitas imágenes "Side-by-Side" (izquierda/derecha)
+    'https://upload.wikimedia.org/wikipedia/commons/1/13/Big_Buck_Bunny_static_stereo_anaglyph.png',
+    'https://upload.wikimedia.org/wikipedia/commons/c/c5/Stereo_test_image_woman_and_flowers.jpg',
+    'https://upload.wikimedia.org/wikipedia/commons/b/b3/Stereo_pair_in_parallel_view_format.jpg'
 ];
 let currentImageIndex = 0;
-let imageMesh; // Plano donde se proyectará la imagen
+let imagePlane, imageMaterial, textureLoader;
 
-// --- VR World Mode Variables ---
-let cubesAndPyramids = []; // Array para los objetos del mundo VR
+// Estado de la interacción por mirada (Gaze)
+let gazeTarget = null;
+let gazeStartTime = 0;
+const GAZE_DWELL_TIME = 1.5; // Tiempo en segundos para "hacer clic"
 
-// --- Gaze Interaction Variables ---
-let gazeTimeoutId = null;
-const GAZE_DURATION = 1500; // Milisegundos para mantener la mirada para activar
-
-// --- Initialization ---
 init();
+animate();
+
+// --- INICIALIZACIÓN ---
 
 function init() {
+    // Escena
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x101010);
+
+    // Cámara
+    camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 1.6, 0); // Posición inicial (altura de los ojos)
+    
+    // Luces
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    directionalLight.position.set(1, 1, 1);
+    scene.add(directionalLight);
+
     // Renderer
     renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setClearColor(0x000000, 1);
+    renderer.xr.enabled = true;
     document.body.appendChild(renderer.domElement);
 
-    // Habilitar WebXR
-    renderer.xr.enabled = true;
+    // Botón de VR
+    document.body.appendChild(VRButton.createButton(renderer));
 
-    // Crea el botón VR y añádelo a un contenedor en tu HTML
-    vrButtonContainer.appendChild(VRButton.createButton(renderer));
+    // Herramientas de interacción
+    clock = new THREE.Clock();
+    setupGazeControls();
 
-    // Cámara (una sola cámara principal para toda la aplicación)
-    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-    camera.position.set(0, 1.6, 0); // Altura de ojos promedio para VR
+    // --- Creación de los "Modos" ---
+    textureLoader = new THREE.TextureLoader();
+    
+    menuGroup = new THREE.Group();
+    imageViewerGroup = new THREE.Group();
+    worldGroup = new THREE.Group();
+    
+    scene.add(menuGroup);
+    scene.add(imageViewerGroup);
+    scene.add(worldGroup);
 
-    // --- Scene Setup ---
-    scene = new THREE.Scene(); // Una sola escena principal que contendrá los elementos del modo activo
+    createMenu();
+    createImageViewer();
+    createWorld();
 
-    // --- Image Mode Setup ---
-    const imageGeometry = new THREE.PlaneGeometry(2, 1); // Relación de aspecto 2:1 para SbS
-    imageMesh = new THREE.Mesh(imageGeometry);
-    // Posicionar el plano de la imagen un poco adelante para que sea visible
-    imageMesh.position.set(0, 1.6, -3); // Centrado a la altura de los ojos, 3 metros adelante
-    loadImage(stereoImages[currentImageIndex]); // Carga la primera imagen, pero no la agrega a la escena aún
+    // Empezar en el modo menú
+    setMode('menu');
 
-    // --- VR World Mode Setup ---
-    // Sky
-    const vrWorldSkyColor = new THREE.Color(0x87ceeb); // Light blue sky
+    // Ajustar la ventana
+    window.addEventListener('resize', onWindowResize);
+}
 
-    // Ground
-    const groundGeometry = new THREE.PlaneGeometry(1000, 1000);
-    const groundMaterial = new THREE.MeshLambertMaterial({ color: 0x6b8e23 }); // Olive green
+// --- CONFIGURACIÓN DE CONTROLES (MIRADA) ---
+
+function setupGazeControls() {
+    // Raycaster (para detectar qué estamos mirando)
+    raycaster = new THREE.Raycaster();
+
+    // Retículo (el punto en el centro de la pantalla)
+    const reticleGeometry = new THREE.RingGeometry(0.01, 0.02, 32);
+    const reticleMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, opacity: 0.7, transparent: true });
+    reticle = new THREE.Mesh(reticleGeometry, reticleMaterial);
+    reticle.position.z = -2; // Colocarlo a 2 metros delante de la cámara
+    reticle.layers.set(0); // Asegurarse de que sea visible en todo momento
+    camera.add(reticle); // Añadirlo a la cámara para que se mueva con ella
+    scene.add(camera); // Añadir la cámara (con el retículo) a la escena
+}
+
+// --- CREACIÓN DE MODOS Y UI ---
+
+function createMenu() {
+    const title = createButton(
+        "Mi Visor WebXR",
+        "title", // 'name' para el raycaster (no interactivo)
+        new THREE.Vector3(0, 2.5, -4),
+        4, 1, false // más grande, no interactivo
+    );
+    
+    const imageButton = createButton(
+        "Modo: Visor de Imágenes",
+        "btn-image-viewer", // 'name' para el raycaster
+        new THREE.Vector3(-1.5, 1.6, -4)
+    );
+    
+    const worldButton = createButton(
+        "Modo: Mundo VR",
+        "btn-world", // 'name' para el raycaster
+        new THREE.Vector3(1.5, 1.6, -4)
+    );
+    
+    menuGroup.add(title, imageButton, worldButton);
+}
+
+function createImageViewer() {
+    // --- Lógica de la imagen Side-by-Side (SBS) ---
+    // Creamos un solo plano y un solo material.
+    // Usaremos el hook `onBeforeRender` del material para
+    // cambiar el 'offset' y 'repeat' de la textura
+    // dinámicamente para cada ojo.
+    
+    imageMaterial = new THREE.MeshBasicMaterial({ map: null });
+    
+    imageMaterial.onBeforeRender = (renderer, scene, camera, geometry, material, group) => {
+        // 'camera' aquí es la cámara específica del ojo (izquierdo o derecho)
+        
+        if (camera.name === 'left') {
+            // Ojo izquierdo: mostrar la mitad izquierda de la textura
+            material.map.offset.x = 0;
+            material.map.repeat.x = 0.5;
+        } else if (camera.name === 'right') {
+            // Ojo derecho: mostrar la mitad derecha de la textura
+            material.map.offset.x = 0.5;
+            material.map.repeat.x = 0.5;
+        } else {
+            // Vista normal (no VR): mostrar la textura completa
+            material.map.offset.x = 0;
+            material.map.repeat.x = 1;
+        }
+    };
+    
+    // Es importante resetear la textura después de renderizar,
+    // para que la vista 'normal' (no VR) funcione correctamente.
+    imageMaterial.onAfterRender = (renderer, scene, camera, geometry, material, group) => {
+        material.map.offset.x = 0;
+        material.map.repeat.x = 1;
+    };
+
+    // Nombrar las cámaras del rig de XR para que la lógica de arriba funcione
+    const xrCamera = renderer.xr.getCamera();
+    xrCamera.cameras[0].name = 'left';
+    xrCamera.cameras[1].name = 'right';
+
+    // Crear el plano para la imagen
+    const imageGeometry = new THREE.PlaneGeometry(4, 2); // Aspecto 2:1 (típico de SBS)
+    imagePlane = new THREE.Mesh(imageGeometry, imageMaterial);
+    imagePlane.position.z = -3;
+    imagePlane.position.y = 1.6;
+
+    // --- Botones de Navegación ---
+    const arrowLeft = createButton("◄", "btn-arrow-left", new THREE.Vector3(-2.5, 1.6, -3), 0.5, 0.5);
+    const arrowRight = createButton("►", "btn-arrow-right", new THREE.Vector3(2.5, 1.6, -3), 0.5, 0.5);
+    const backButton = createButton("Volver al Menú", "btn-back-menu", new THREE.Vector3(0, 0.5, -3), 2, 0.5);
+
+    imageViewerGroup.add(imagePlane, arrowLeft, arrowRight, backButton);
+    
+    // Cargar la primera imagen
+    loadImage(currentImageIndex);
+}
+
+function createWorld() {
+    // Cielo
+    const skyGeometry = new THREE.SphereGeometry(50, 32, 32);
+    const skyMaterial = new THREE.MeshBasicMaterial({ color: 0x87ceeb, side: THREE.BackSide });
+    const sky = new THREE.Mesh(skyGeometry, skyMaterial);
+    
+    // Suelo
+    const groundGeometry = new THREE.PlaneGeometry(100, 100);
+    const groundMaterial = new THREE.MeshBasicMaterial({ color: 0x228B22 });
     const ground = new THREE.Mesh(groundGeometry, groundMaterial);
     ground.rotation.x = -Math.PI / 2;
-    // Posición del suelo (en 0,0,0)
-    ground.position.y = -0.01; // Ligeramente por debajo para evitar z-fighting
+    ground.position.y = 0;
+    
+    // Torre (donde está el jugador)
+    const towerGeometry = new THREE.CylinderGeometry(2, 2, 10, 16);
+    const towerMaterial = new THREE.MeshStandardMaterial({ color: 0x888888 });
+    const tower = new THREE.Mesh(towerGeometry, towerMaterial);
+    tower.position.y = 5; // La mitad de su altura, para que la base esté en y=0
+    
+    worldGroup.add(sky, ground, tower);
 
-    // Lights
-    const ambientLight = new THREE.AmbientLight(0x404040);
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    directionalLight.position.set(0, 1, 0).normalize();
-
-
-    // --- Event Listeners ---
-    window.addEventListener('resize', onWindowResize);
-    modeImagesBtn.addEventListener('click', () => setMode('images'));
-    modeVrWorldBtn.addEventListener('click', () => setMode('vr-world'));
-    prevImageBtn.addEventListener('click', prevImage);
-    nextImageBtn.addEventListener('click', nextImage);
-
-    // Eventos para WebXR (cuando se entra o sale de VR)
-    renderer.xr.addEventListener('sessionstart', onSessionStart);
-    renderer.xr.addEventListener('sessionend', onSessionEnd);
-
-    // Gaze interaction for VR UI
-    // En WebXR, la posición del puntero de mirada se obtiene a través del raycaster
-    // No necesitamos mousemove/mousedown directamente en el body para la mirada
-
-    // Start in UI mode
-    showUI();
-    setMode('start'); // Configura el estado inicial sin objetos en escena
+    // Montañas (cubos y pirámides)
+    for (let i = 0; i < 50; i++) {
+        const isCube = Math.random() > 0.5;
+        const size = Math.random() * 5 + 2;
+        
+        const geometry = isCube ? 
+            new THREE.BoxGeometry(size, size, size) : 
+            new THREE.ConeGeometry(size / 1.5, size * 1.5, 4); // Pirámide
+            
+        const material = new THREE.MeshStandardMaterial({ 
+            color: isCube ? 0x8B4513 : 0x696969, // Marrón o Gris
+            flatShading: true
+        });
+        
+        const mountain = new THREE.Mesh(geometry, material);
+        
+        const x = (Math.random() - 0.5) * 80;
+        const z = (Math.random() - 0.5) * 80;
+        
+        // Evitar que aparezcan en la torre
+        if (Math.abs(x) < 5 && Math.abs(z) < 5) continue;
+        
+        mountain.position.set(x, size / 2, z); // Anclar a la base
+        worldGroup.add(mountain);
+    }
+    
+    // Botón para volver al menú
+    const backButton = createButton("Volver al Menú", "btn-back-menu", new THREE.Vector3(0, 1.6, -2));
+    backButton.position.set(0, 11, -3); // Posicionarlo en el aire, frente a la torre
+    worldGroup.add(backButton);
+    
+    // Posicionar la cámara en la cima de la torre (10m + 1.6m de altura de ojos)
+    // NOTA: En VR, la altura 'y' se sumará a la altura real del jugador.
+    // Para una experiencia sentada, esto está bien.
+    // Para 'room scale', el suelo del mundo (y=0) será el suelo real.
+    // Ajustamos la posición de la torre y el suelo para que y=10 sea la cima.
+    tower.position.y = 5; // Base en 0, cima en 10
+    ground.position.y = 0;
+    // Movemos el *grupo* del mundo hacia abajo para que la cima de la torre
+    // esté a la altura de los ojos (1.6m)
+    worldGroup.position.y = -8.4; // (1.6m - 10m)
 }
+
+
+// --- FUNCIONES AUXILIARES ---
+
+/**
+ * Función de ayuda para crear botones de UI como planos con texto.
+ */
+function createButton(text, name, position, width = 2, height = 0.5, interactive = true) {
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    
+    canvas.width = 512;
+    canvas.height = (512 * height) / width;
+    
+    context.fillStyle = interactive ? "rgba(0, 0, 0, 0.7)" : "rgba(0, 0, 0, 0.0)";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    
+    context.fillStyle = "white";
+    context.font = "60px sans-serif";
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillText(text, canvas.width / 2, canvas.height / 2);
+    
+    const texture = new THREE.CanvasTexture(canvas);
+    const material = new THREE.MeshBasicMaterial({ map: texture, transparent: true });
+    const geometry = new THREE.PlaneGeometry(width, height);
+    const mesh = new THREE.Mesh(geometry, material);
+    
+    mesh.name = name;
+    mesh.position.copy(position);
+    mesh.layers.set(0); // Visible en todos los modos/ojos
+    
+    return mesh;
+}
+
+/**
+ * Cambia la visibilidad de los grupos de la escena.
+ */
+function setMode(mode) {
+    currentMode = mode;
+    
+    menuGroup.visible = (mode === 'menu');
+    imageViewerGroup.visible = (mode === 'image-viewer');
+    worldGroup.visible = (mode === 'world');
+    
+    // Si entramos al modo mundo, ajustamos la posición de la cámara
+    if (mode === 'world') {
+        // La cámara (rig) se coloca en la cima de la torre
+        // El grupo del mundo se ajusta para que la cima (y=10)
+        // coincida con la altura de los ojos (y=1.6)
+        camera.position.y = 1.6; // Altura de ojos estándar
+        worldGroup.position.y = -8.4; // Mover mundo (1.6m - 10m de torre)
+        
+    } else {
+        // En el menú y visor, la cámara está en el origen (0, 1.6, 0)
+        // y los elementos están flotando en el aire.
+        camera.position.y = 1.6;
+        worldGroup.position.y = 0; // Resetear posición del mundo
+    }
+}
+
+/**
+ * Carga una nueva textura en el plano de imagen.
+ */
+function loadImage(index) {
+    currentImageIndex = index;
+    textureLoader.load(imageCollection[index], (texture) => {
+        imageMaterial.map = texture;
+        imageMaterial.needsUpdate = true;
+    });
+}
+
+// --- BUCLE DE ANIMACIÓN Y LÓGICA DE INTERACCIÓN ---
+
+function animate() {
+    renderer.setAnimationLoop(render);
+}
+
+function render() {
+    // Solo procesar la mirada si estamos en VR
+    if (renderer.xr.isPresenting) {
+        handleGazeInteraction();
+    }
+    
+    renderer.render(scene, camera);
+}
+
+function handleGazeInteraction() {
+    // 1. Lanzar el rayo desde el centro de la cámara
+    raycaster.setFromCamera({ x: 0, y: 0 }, camera);
+    
+    // 2. Comprobar intersecciones solo con objetos interactivos
+    // Buscamos en toda la escena, pero solo reaccionamos a los botones
+    const intersects = raycaster.intersectObjects(scene.children, true);
+    
+    // Filtrar solo los objetos con nombre 'btn-'
+    const hit = intersects.find(intersect => 
+        intersect.object.name.startsWith('btn-') && intersect.object.visible
+    );
+
+    if (hit) {
+        // Estamos mirando un botón
+        const hitObject = hit.object;
+        
+        if (gazeTarget !== hitObject) {
+            // Empezamos a mirar un *nuevo* botón
+            if (gazeTarget) {
+                // Restaurar el botón anterior
+                gazeTarget.scale.set(1, 1, 1);
+            }
+            gazeTarget = hitObject;
+            gazeTarget.scale.set(1.1, 1.1, 1.1); // Resaltar botón
+            gazeStartTime = clock.getElapsedTime();
+        } else {
+            // Seguimos mirando el mismo botón
+            const elapsedTime = clock.getElapsedTime() - gazeStartTime;
+            if (elapsedTime > GAZE_DWELL_TIME) {
+                // ¡Clic!
+                triggerGazeAction(gazeTarget.name);
+                gazeStartTime = clock.getElapsedTime(); // Resetear para evitar clics múltiples
+            }
+        }
+    } else {
+        // No estamos mirando nada interactivo
+        if (gazeTarget) {
+            // Dejar de resaltar el botón
+            gazeTarget.scale.set(1, 1, 1);
+        }
+        gazeTarget = null;
+    }
+}
+
+function triggerGazeAction(name) {
+    console.log("Acción de mirada: ", name);
+    switch (name) {
+        // --- Menú ---
+        case 'btn-image-viewer':
+            setMode('image-viewer');
+            break;
+        case 'btn-world':
+            setMode('world');
+            break;
+        
+        // --- Visor de Imágenes ---
+        case 'btn-arrow-left':
+            currentImageIndex--;
+            if (currentImageIndex < 0) {
+                currentImageIndex = imageCollection.length - 1;
+            }
+            loadImage(currentImageIndex);
+            break;
+        case 'btn-arrow-right':
+            currentImageIndex++;
+            if (currentImageIndex >= imageCollection.length) {
+                currentImageIndex = 0;
+            }
+            loadImage(currentImageIndex);
+            break;
+        
+        // --- Botón Común "Volver" ---
+        case 'btn-back-menu':
+            setMode('menu');
+            break;
+    }
+}
+
+// --- MANEJADOR DE REDIMENSIONAMIENTO ---
 
 function onWindowResize() {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
 }
-
-function setMode(mode) {
-    currentMode = mode;
-    console.log(`Cambiando a modo: ${mode}`);
-
-    // Limpia la escena de todos los elementos anteriores
-    while (scene.children.length > 0) {
-        scene.remove(scene.children[0]);
-    }
-
-    if (mode === 'images') {
-        scene.add(imageMesh);
-        imageControls.classList.remove('hidden');
-        // Asegúrate de que la cámara esté orientada correctamente para ver la imagen
-        camera.position.set(0, 1.6, 0);
-        camera.lookAt(imageMesh.position);
-    } else if (mode === 'vr-world') {
-        // Agrega luces y suelo
-        scene.add(new THREE.AmbientLight(0x404040));
-        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-        directionalLight.position.set(0, 1, 0).normalize();
-        scene.add(directionalLight);
-        scene.background = new THREE.Color(0x87ceeb); // Light blue sky
-
-        // Agrega el suelo
-        const groundGeometry = new THREE.PlaneGeometry(1000, 1000);
-        const groundMaterial = new THREE.MeshLambertMaterial({ color: 0x6b8e23 });
-        const ground = new THREE.Mesh(groundGeometry, groundMaterial);
-        ground.rotation.x = -Math.PI / 2;
-        ground.position.y = -0.01;
-        scene.add(ground);
-
-        // Crea y agrega las montañas
-        createVrWorldMountains();
-        cubesAndPyramids.forEach(obj => scene.add(obj));
-
-        // Posición inicial de la cámara para el mundo VR
-        camera.position.set(0, 1.6, 0); // Altura de los ojos
-    } else { // 'start' mode
-        // No hay elementos específicos en la escena, solo la UI
-        camera.position.set(0, 1.6, 5); // Una posición por defecto
-        scene.background = new THREE.Color(0x000000); // Fondo negro
-    }
-    // Asegúrate de que la UI sea visible al cambiar de modo (fuera de VR)
-    if (!renderer.xr.isPresenting) {
-        showUI();
-    }
-}
-
-function onSessionStart() {
-    console.log("Sesión WebXR iniciada.");
-    hideUI();
-    vrGazePointer.style.display = 'block';
-}
-
-function onSessionEnd() {
-    console.log("Sesión WebXR finalizada.");
-    showUI();
-    vrGazePointer.style.display = 'none';
-    clearGazeTimeout(); // Limpia cualquier acción de mirada pendiente
-}
-
-function showUI() {
-    uiContainer.classList.remove('hidden');
-    vrGazePointer.style.display = 'none'; // El puntero de mirada solo es visible en VR
-    // Es posible que necesites ajustar la visibilidad del botón VR
-    const vrButton = vrButtonContainer.querySelector('.webxr-button');
-    if (vrButton) vrButton.style.display = 'block';
-}
-
-function hideUI() {
-    uiContainer.classList.add('hidden');
-    vrGazePointer.style.display = 'block';
-    const vrButton = vrButtonContainer.querySelector('.webxr-button');
-    if (vrButton) vrButton.style.display = 'none'; // Ocultar el botón VR cuando ya estamos en VR
-}
-
-// --- Image Mode Functions ---
-function loadImage(path) {
-    const loader = new THREE.TextureLoader();
-    loader.load(path, (texture) => {
-        if (imageMesh.material) {
-            imageMesh.material.dispose(); // Limpiar material anterior
-        }
-        imageMesh.material = new THREE.MeshBasicMaterial({ map: texture });
-        imageMesh.material.needsUpdate = true;
-    }, undefined, (err) => {
-        console.error('Error al cargar la imagen estereoscópica:', err);
-    });
-}
-
-function prevImage() {
-    currentImageIndex = (currentImageIndex - 1 + stereoImages.length) % stereoImages.length;
-    loadImage(stereoImages[currentImageIndex]);
-    console.log(`Cargando imagen anterior: ${stereoImages[currentImageIndex]}`);
-}
-
-function nextImage() {
-    currentImageIndex = (currentImageIndex + 1) % stereoImages.length;
-    loadImage(stereoImages[currentImageIndex]);
-    console.log(`Cargando imagen siguiente: ${stereoImages[currentImageIndex]}`);
-}
-
-// --- VR World Functions ---
-function createVrWorldMountains() {
-    const minHeight = 5;
-    const maxHeight = 50;
-    const numMountains = 50;
-
-    // Limpia las montañas existentes antes de crearlas de nuevo
-    cubesAndPyramids.forEach(obj => {
-        if (scene.children.includes(obj)) {
-            scene.remove(obj);
-        }
-        obj.geometry.dispose();
-        obj.material.dispose();
-    });
-    cubesAndPyramids = [];
-
-    for (let i = 0; i < numMountains; i++) {
-        const type = Math.random() > 0.5 ? 'cube' : 'pyramid';
-        const height = Math.random() * (maxHeight - minHeight) + minHeight;
-        const width = height * (0.5 + Math.random() * 0.5);
-        const depth = height * (0.5 + Math.random() * 0.5);
-
-        let geometry;
-        if (type === 'cube') {
-            geometry = new THREE.BoxGeometry(width, height, depth);
-        } else {
-            geometry = new THREE.ConeGeometry(width / 2, height, 4);
-        }
-
-        const material = new THREE.MeshLambertMaterial({
-            color: new THREE.Color(Math.random() * 0.2 + 0.3, Math.random() * 0.1 + 0.2, Math.random() * 0.1 + 0.2)
-        });
-
-        const mountain = new THREE.Mesh(geometry, material);
-
-        let x, z;
-        do {
-            x = (Math.random() - 0.5) * 800;
-            z = (Math.random() - 0.5) * 800;
-        } while (Math.abs(x) < 50 && Math.abs(z) < 50);
-
-        mountain.position.set(x, height / 2, z);
-        mountain.rotation.y = Math.random() * Math.PI * 2;
-
-        cubesAndPyramids.push(mountain);
-    }
-}
-
-// --- Gaze Interaction for WebXR UI ---
-const raycaster = new THREE.Raycaster();
-let intersectedObject = null; // El objeto 3D de la UI que está siendo "mirado"
-const interactiveObjects = []; // Contendrá los meshes invisibles que representan los botones de la UI
-
-function createInteractiveUIButtons() {
-    // Limpiar objetos interactivos anteriores
-    interactiveObjects.forEach(obj => scene.remove(obj));
-    interactiveObjects.length = 0; // Vaciar array
-
-    // Solo crea los botones 3D si la UI está visible y no estamos en VR
-    if (!renderer.xr.isPresenting && !uiContainer.classList.contains('hidden')) {
-        return;
-    }
-
-    const buttonElements = uiContainer.querySelectorAll('button');
-    const tempScene = new THREE.Scene(); // Una escena temporal para obtener posiciones relativas de los botones
-
-    // Clonar los botones en Three.js como planos invisibles para raycasting
-    buttonElements.forEach(button => {
-        const rect = button.getBoundingClientRect();
-
-        // Crear un plano que represente el botón en el espacio 3D
-        const geometry = new THREE.PlaneGeometry(
-            rect.width / window.innerWidth * 10,  // Escalar para que se vea bien en VR
-            rect.height / window.innerHeight * 10
-        );
-        const material = new THREE.MeshBasicMaterial({
-            color: 0xff0000,
-            transparent: true,
-            opacity: 0, // Invisible
-            side: THREE.DoubleSide
-        });
-        const buttonMesh = new THREE.Mesh(geometry, material);
-
-        // Posicionar el mesh en el espacio 3D para que coincida con la posición percibida del botón en 2D
-        // Esto es un poco hacky y dependerá de cómo proyectes tu UI.
-        // Una forma simple es colocarlo a una distancia fija frente a la cámara
-        // y ajustar su posición XY en función de su posición relativa en pantalla.
-        const targetZ = -2; // Distancia de los botones en VR
-        const normalizedX = (rect.left + rect.width / 2) / window.innerWidth - 0.5;
-        const normalizedY = -(rect.top + rect.height / 2) / window.innerHeight + 0.5;
-
-        buttonMesh.position.set(normalizedX * 4, normalizedY * 3 + 1.6, targetZ); // Ajustar escala y altura
-
-        // Asocia el mesh 3D con el elemento DOM original para el click
-        buttonMesh.userData.domElement = button;
-        buttonMesh.name = `ui-button-${button.id}`;
-        interactiveObjects.push(buttonMesh);
-        scene.add(buttonMesh); // Añadir a la escena principal
-    });
-}
-
-function updateGazeInteraction() {
-    if (!renderer.xr.isPresenting || uiContainer.classList.contains('hidden')) {
-        // No hay interacción de mirada si no estamos en VR o la UI está oculta
-        clearGazeTimeout();
-        if (intersectedObject) {
-            intersectedObject.userData.domElement.style.border = 'none';
-            intersectedObject = null;
-        }
-        return;
-    }
-
-    // Obtener la dirección de la mirada de la cámara XR
-    // La cámara de Three.js ya está alineada con la vista del usuario en VR
-    raycaster.setFromCamera(new THREE.Vector2(0, 0), camera); // Vector (0,0) es el centro de la pantalla
-
-    const intersects = raycaster.intersectObjects(interactiveObjects, true);
-
-    if (intersects.length > 0) {
-        if (intersectedObject !== intersects[0].object) {
-            // Nuevo objeto "mirado"
-            if (intersectedObject) {
-                // Dejar de mirar el objeto anterior
-                intersectedObject.userData.domElement.style.border = 'none';
-                clearGazeTimeout();
-            }
-            intersectedObject = intersects[0].object;
-            intersectedObject.userData.domElement.style.border = '3px solid yellow'; // Resaltar
-            startGazeTimeout(intersectedObject.userData.domElement);
-        }
-    } else {
-        // No hay objetos "mirados"
-        if (intersectedObject) {
-            intersectedObject.userData.domElement.style.border = 'none';
-            clearGazeTimeout();
-            intersectedObject = null;
-        }
-    }
-}
-
-function startGazeTimeout(element) {
-    clearGazeTimeout();
-    vrGazePointer.classList.add('active'); // Indicar que el puntero está activo
-    gazeTimeoutId = setTimeout(() => {
-        if (element && renderer.xr.isPresenting && !uiContainer.classList.contains('hidden')) {
-            console.log('Activando por gaze:', element.id);
-            element.click(); // Simular un click
-            vrGazePointer.classList.remove('active'); // Reset after activation
-            element.style.border = 'none'; // Quitar el highlight
-            intersectedObject = null; // Reset hovered element
-        }
-    }, GAZE_DURATION);
-}
-
-function clearGazeTimeout() {
-    if (gazeTimeoutId) {
-        clearTimeout(gazeTimeoutId);
-        gazeTimeoutId = null;
-        vrGazePointer.classList.remove('active');
-    }
-}
-
-// --- Animation Loop ---
-function animate() {
-    // Cuando WebXR está activo, el bucle de animación se gestiona por renderer.setAnimationLoop
-    // Fuera de VR, usamos requestAnimationFrame
-    if (!renderer.xr.isPresenting) {
-        requestAnimationFrame(animate);
-        // Actualiza las interacciones de mirada solo si la UI es visible y estamos fuera de VR
-        // (Aunque para "gaze" fuera de VR, el mousemove sería más apropiado como en la versión anterior)
-        // Para simplificar, asumimos que el gaze es principal para VR.
-    }
-
-    // Lógica de actualización para el mundo VR
-    if (currentMode === 'vr-world' && renderer.xr.isPresenting) {
-        // En VR, la cámara se mueve con el usuario, no la rotamos automáticamente
-        // Si no estamos en VR, podemos hacer una rotación suave para demo
-        // vrWorldCamera.rotation.y += 0.001; // Ya no aplica directamente a `camera` en WebXR
-    }
-
-    updateGazeInteraction(); // Siempre comprueba la interacción de mirada si estamos en VR
-
-    if (scene && camera) {
-        renderer.render(scene, camera);
-    }
-}
-
-// El bucle de animación principal para WebXR
-renderer.setAnimationLoop(animate);
